@@ -50,4 +50,10 @@ export default [
   route("api/logout", "routes/api.logout.ts"),
   route("api/video-tracking", "routes/api.video-tracking.ts"),
   route("api/set-dev-country", "routes/api.set-dev-country.ts"),
+  // Resource route (mutations only), deliberately outside the app layout so a
+  // comment submission does not re-run the layout loader.
+  route(
+    "courses/:slug/lessons/:lessonId/comments",
+    "routes/courses.$slug.lessons.$lessonId.comments.tsx"
+  ),
 ] satisfies RouteConfig;
