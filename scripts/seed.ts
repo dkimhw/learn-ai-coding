@@ -45,6 +45,7 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS lesson_comments;
     DROP TABLE IF EXISTS video_watch_events;
     DROP TABLE IF EXISTS quiz_answers;
     DROP TABLE IF EXISTS quiz_attempts;
@@ -1421,6 +1422,164 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   console.log("Created 7 course reviews.");
 
+  // ─── Lesson Comments ───
+  // Chosen so the states that are hard to reach by happy-path clicking are
+  // visible on first load: a fenced code block, a soft-deleted parent with
+  // surviving replies ([deleted] tombstone), a thread past the 3-reply cap
+  // ("show N more replies"), an edited comment, and instructor replies.
+
+  function comment(
+    lessonId: number,
+    userId: number,
+    body: string,
+    parentId: number | null,
+    createdDaysAgo: number,
+    options: { editedDaysAgo?: number; deletedDaysAgo?: number } = {}
+  ) {
+    return db
+      .insert(schema.lessonComments)
+      .values({
+        lessonId,
+        userId,
+        parentId,
+        body,
+        createdAt: daysAgo(createdDaysAgo),
+        editedAt: options.editedDaysAgo
+          ? daysAgo(options.editedDaysAgo)
+          : null,
+        deletedAt: options.deletedDaysAgo
+          ? daysAgo(options.deletedDaysAgo)
+          : null,
+      })
+      .returning()
+      .get();
+  }
+
+  const c1Lesson = course1LessonIds[0];
+  const c2Lesson = course2LessonIds[0];
+
+  // Thread 1 — fenced code block, answered by the instructor.
+  const t1 = comment(
+    c1Lesson,
+    students[0].id,
+    [
+      "Is there a reason to annotate the return type here? I wrote:",
+      "",
+      "```ts",
+      "function greet(name: string) {",
+      "  return `Hello, ${name}`;",
+      "}",
+      "```",
+      "",
+      "and TypeScript already knows it's a `string`.",
+    ].join("\n"),
+    null,
+    12
+  );
+  comment(
+    c1Lesson,
+    students[1].id,
+    "Same question — inference seems to handle it fine?",
+    t1.id,
+    11
+  );
+  comment(
+    c1Lesson,
+    instructor1.id,
+    [
+      "Inference does handle it. The reason to annotate anyway is that the",
+      "annotation becomes a **contract**: if you later change the body and",
+      "accidentally return `undefined`, the error points at the function",
+      "instead of at whatever consumed it three files away.",
+    ].join("\n"),
+    t1.id,
+    10
+  );
+
+  // Thread 2 — soft-deleted parent whose replies survive, so it renders [deleted].
+  const t2 = comment(
+    c1Lesson,
+    students[2].id,
+    "Deleted by the author after they figured it out.",
+    null,
+    9,
+    { deletedDaysAgo: 8 }
+  );
+  comment(
+    c1Lesson,
+    students[0].id,
+    "For anyone finding this later: it was a missing `strict` flag in tsconfig.",
+    t2.id,
+    9
+  );
+  comment(
+    c1Lesson,
+    instructor1.id,
+    "Adding this to the lesson notes — thanks both.",
+    t2.id,
+    8
+  );
+
+  // Thread 3 — more than 3 replies, so "show N more replies" appears.
+  const t3 = comment(
+    c1Lesson,
+    students[4].id,
+    "What editor setup is everyone using for this course?",
+    null,
+    6
+  );
+  comment(c1Lesson, students[0].id, "VS Code with the built-in TS server.", t3.id, 6);
+  comment(c1Lesson, students[1].id, "Same, plus ESLint on save.", t3.id, 5);
+  comment(
+    c1Lesson,
+    students[2].id,
+    "Neovim here. `typescript-tools.nvim` has been solid.",
+    t3.id,
+    4
+  );
+  comment(
+    c1Lesson,
+    instructor1.id,
+    "Any of these are fine. The one thing I'd insist on is enabling format-on-save.",
+    t3.id,
+    3
+  );
+  comment(
+    c1Lesson,
+    students[4].id,
+    "Thanks all — going with VS Code to keep it simple.",
+    t3.id,
+    2
+  );
+
+  // Thread 4 — an edited comment, so the "edited" marker is visible.
+  comment(
+    c1Lesson,
+    students[1].id,
+    "Small correction to my earlier note: it's `tsc --noEmit`, not `tsc --check`.",
+    null,
+    3,
+    { editedDaysAgo: 2 }
+  );
+
+  // A second course gets a thread too, with its own instructor answering.
+  const t5 = comment(
+    c2Lesson,
+    students[3].id,
+    "Does the ordering of `app.use()` calls matter for error middleware?",
+    null,
+    5
+  );
+  comment(
+    c2Lesson,
+    instructor2.id,
+    "It matters a lot — error handlers must be registered **last**, after every route.",
+    t5.id,
+    4
+  );
+
+  console.log("Created 5 comment threads (15 comments, 1 soft-deleted).");
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete
@@ -1755,6 +1914,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   console.log("  Enrollments: 7");
   console.log("  Purchases: 6 (5 individual + 1 team)");
   console.log("  Teams: 1 (with 5 coupons)");
+  console.log("  Lesson comments: 15 across 5 threads");
 }
 
 seed().catch(console.error);

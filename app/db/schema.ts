@@ -3,7 +3,9 @@ import {
   text,
   integer,
   real,
+  index,
   uniqueIndex,
+  type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
 
 export enum UserRole {
@@ -271,6 +273,43 @@ export const coupons = sqliteTable("coupons", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// Public per-lesson discussion. Slack-style: top-level comments, one level of
+// replies (parentId always points at a top-level comment — enforced in the service).
+//
+// Two deliberate departures from the surrounding tables:
+// - No `updatedAt`: it would be written by both edits and soft deletes, so it
+//   could not answer "was this edited?". Nullable `editedAt` answers exactly that.
+// - `parentId` self-references, which Drizzle requires an explicit
+//   `AnySQLiteColumn` return type on.
+export const lessonComments = sqliteTable(
+  "lesson_comments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    lessonId: integer("lesson_id")
+      .notNull()
+      .references(() => lessons.id),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id),
+    parentId: integer("parent_id").references(
+      (): AnySQLiteColumn => lessonComments.id
+    ),
+    body: text("body").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    editedAt: text("edited_at"),
+    deletedAt: text("deleted_at"),
+  },
+  (table) => [
+    index("lesson_comments_lesson_parent_created").on(
+      table.lessonId,
+      table.parentId,
+      table.createdAt
+    ),
+  ]
+);
 
 export const videoWatchEvents = sqliteTable("video_watch_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),

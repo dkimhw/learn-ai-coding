@@ -26,7 +26,15 @@ import {
   getBestAttempt,
 } from "~/services/quizService";
 import { computeResult } from "~/services/quizScoringService";
-import { LessonProgressStatus } from "~/db/schema";
+import {
+  canModifyComment,
+  canViewComments,
+  getCommentCountForLesson,
+  getCommentsForLesson,
+  type Comment as CommentRecord,
+} from "~/services/commentService";
+import { getUserById } from "~/services/userService";
+import { LessonProgressStatus, UserRole } from "~/db/schema";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import {
@@ -47,8 +55,13 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { cn, formatDuration } from "~/lib/utils";
-import { renderMarkdown } from "~/lib/markdown.server";
+import { renderCommentMarkdown, renderMarkdown } from "~/lib/markdown.server";
 import { YouTubePlayer } from "~/components/youtube-player";
+import {
+  LessonComments,
+  type CommentThreadView,
+  type CommentView,
+} from "~/components/lesson-comments";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
 import { resolveCountry } from "~/lib/country.server";
@@ -97,6 +110,56 @@ function flattenCourseLessons(course: {
     }
   }
   return flat;
+}
+
+/**
+ * Shapes a stored comment for the client: markdown rendered through the
+ * sanitizing comment path, and the edit/delete affordances resolved with the
+ * same predicate the resource route enforces.
+ */
+async function toCommentView(
+  comment: CommentRecord,
+  viewerId: number,
+  courseInstructorId: number,
+  viewerIsCourseInstructor: boolean,
+  viewerIsAdmin: boolean
+): Promise<CommentView> {
+  const canEdit =
+    !comment.deleted &&
+    canModifyComment(
+      "edit",
+      comment.author.id,
+      viewerId,
+      viewerIsCourseInstructor,
+      viewerIsAdmin
+    );
+
+  return {
+    id: comment.id,
+    parentId: comment.parentId,
+    bodyHtml: comment.deleted ? null : await renderCommentMarkdown(comment.body),
+    // Raw markdown only goes to someone who can actually open the editor.
+    body: canEdit ? comment.body : null,
+    createdAt: comment.createdAt,
+    editedAt: comment.editedAt,
+    deleted: comment.deleted,
+    author: {
+      id: comment.author.id,
+      name: comment.author.name,
+      avatarUrl: comment.author.avatarUrl,
+    },
+    isCourseInstructor: comment.author.id === courseInstructorId,
+    canEdit,
+    canDelete:
+      !comment.deleted &&
+      canModifyComment(
+        "delete",
+        comment.author.id,
+        viewerId,
+        viewerIsCourseInstructor,
+        viewerIsAdmin
+      ),
+  };
 }
 
 export async function loader({ params, request }: Route.LoaderArgs) {
@@ -248,6 +311,44 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
+  // Discussion. Read is gated identically to write; a user who fails the check
+  // does not see the section at all — not a locked or teased version.
+  const currentUser = currentUserId ? getUserById(currentUserId) : null;
+  const isCourseInstructor = !!currentUser && course.instructorId === currentUser.id;
+  const isAdmin = currentUser?.role === UserRole.Admin;
+  const canComment =
+    !!currentUser &&
+    canViewComments(enrolled, isCourseInstructor, isAdmin, pppBlocked);
+
+  let commentThreads: CommentThreadView[] = [];
+  let commentCount = 0;
+
+  if (canComment && currentUser) {
+    commentCount = getCommentCountForLesson(lessonId);
+    commentThreads = await Promise.all(
+      getCommentsForLesson(lessonId).map(async (thread) => ({
+        ...(await toCommentView(
+          thread,
+          currentUser.id,
+          course.instructorId,
+          isCourseInstructor,
+          isAdmin
+        )),
+        replies: await Promise.all(
+          thread.replies.map((reply) =>
+            toCommentView(
+              reply,
+              currentUser.id,
+              course.instructorId,
+              isCourseInstructor,
+              isAdmin
+            )
+          )
+        ),
+      }))
+    );
+  }
+
   return {
     course: {
       id: courseWithDetails.id,
@@ -281,6 +382,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    canComment,
+    commentThreads,
+    commentCount,
   };
 }
 
@@ -382,6 +486,9 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    canComment,
+    commentThreads,
+    commentCount,
   } = loaderData;
   const [autoplay, toggleAutoplay] = useAutoplay();
   const fetcher = useFetcher({ key: `mark-complete-${lesson.id}` });
@@ -590,6 +697,15 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
                 </fetcher.Form>
               )}
             </div>
+          )}
+
+          {/* Discussion */}
+          {canComment && (
+            <LessonComments
+              actionUrl={`/courses/${course.slug}/lessons/${lesson.id}/comments`}
+              threads={commentThreads}
+              commentCount={commentCount}
+            />
           )}
 
           {/* Prev/Next Navigation */}

@@ -1,15 +1,3 @@
 {
-  "mcpServers": {
-    "claucode-c8cfbb6a": {
-      "type": "stdio",
-      "command": "node",
-      "args": [
-        "/Users/david/.local/share/nvim/lazy/claucode.nvim/mcp-server/build/index.js"
-      ],
-      "env": {
-        "CLAUCODE_SESSION_ID": "claucode-c8cfbb6a",
-        "CLAUCODE_COMM_DIR": "/Users/david/.local/share/claucode/diffs/claucode-c8cfbb6a"
-      }
-    }
-  }
+  "mcpServers": {}
 }
