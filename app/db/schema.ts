@@ -311,6 +311,33 @@ export const lessonComments = sqliteTable(
   ]
 );
 
+// Private per-student lesson bookmarks. Presence of a row *is* the bookmark —
+// there is no `active` flag, so unbookmarking is a hard delete. Bookmarks are
+// independent of progress: completing a lesson does not clear its bookmark.
+export const lessonBookmarks = sqliteTable(
+  "lesson_bookmarks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id),
+    lessonId: integer("lesson_id")
+      .notNull()
+      .references(() => lessons.id),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [
+    // At most one bookmark per student per lesson — this is what makes the
+    // toggle idempotent under double-submits.
+    uniqueIndex("lesson_bookmarks_user_lesson_unique").on(
+      table.userId,
+      table.lessonId
+    ),
+  ]
+);
+
 export const videoWatchEvents = sqliteTable("video_watch_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id")

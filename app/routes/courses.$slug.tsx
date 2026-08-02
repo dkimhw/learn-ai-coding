@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug";
@@ -13,6 +13,7 @@ import {
   getLessonProgressForCourse,
   getNextIncompleteLesson,
 } from "~/services/progressService";
+import { getBookmarkedLessonIds } from "~/services/bookmarkService";
 import {
   getCourseRatingStats,
   getReviewByUserAndCourse,
@@ -34,6 +35,7 @@ import {
 } from "~/components/ui/tabs";
 import {
   AlertTriangle,
+  Bookmark,
   BookOpen,
   CheckCircle2,
   Circle,
@@ -81,6 +83,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
   let userRating: number | null = null;
+  let bookmarkedLessonIds: number[] = [];
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
@@ -101,6 +104,11 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
       userRating =
         getReviewByUserAndCourse(currentUserId, course.id)?.rating ?? null;
+
+      bookmarkedLessonIds = getBookmarkedLessonIds({
+        userId: currentUserId,
+        courseId: course.id,
+      });
     }
   }
 
@@ -130,6 +138,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     tierInfo,
     ratingStats,
     userRating,
+    bookmarkedLessonIds,
   };
 }
 
@@ -232,9 +241,15 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     tierInfo,
     ratingStats,
     userRating,
+    bookmarkedLessonIds,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
+
+  const bookmarkedIds = useMemo(
+    () => new Set(bookmarkedLessonIds),
+    [bookmarkedLessonIds]
+  );
 
   useEffect(() => {
     if (searchParams.get("already_enrolled") === "1") {
@@ -411,6 +426,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
               enrolled={enrolled}
               isInstructor={isInstructor}
               lessonProgressMap={lessonProgressMap}
+              bookmarkedLessonIds={bookmarkedIds}
             />
           </div>
         </div>
@@ -514,6 +530,7 @@ function CourseContent({
   enrolled,
   isInstructor,
   lessonProgressMap,
+  bookmarkedLessonIds,
 }: {
   course: {
     id: number;
@@ -531,6 +548,8 @@ function CourseContent({
   enrolled: boolean;
   isInstructor: boolean;
   lessonProgressMap: Record<number, string>;
+  /** Read-only here — bookmarks are toggled from the lesson page. */
+  bookmarkedLessonIds: Set<number>;
 }) {
   return (
     <div>
@@ -544,13 +563,16 @@ function CourseContent({
           {course.modules.map((mod) => (
             <Card key={mod.id}>
               <CardHeader>
-                <h3 className="font-semibold">
+                <h3 className="flex items-center gap-2 font-semibold">
                   <Link
                     to={`/courses/${course.slug}/${mod.id}`}
                     className="hover:underline"
                   >
                     {mod.title}
                   </Link>
+                  {mod.lessons.some((l) => bookmarkedLessonIds.has(l.id)) && (
+                    <Bookmark className="size-3.5 shrink-0 fill-amber-500 text-amber-500" />
+                  )}
                 </h3>
                 <p className="text-sm text-muted-foreground">
                   {mod.lessons.length} lessons
@@ -615,6 +637,9 @@ function CourseContent({
                                   false
                                 )}
                               </span>
+                            )}
+                            {bookmarkedLessonIds.has(lesson.id) && (
+                              <Bookmark className="size-4 shrink-0 fill-amber-500 text-amber-500" />
                             )}
                           </Link>
                         ) : (
