@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Link, useFetcher, useNavigate } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug.lessons.$lessonId";
@@ -16,6 +16,11 @@ import {
   markLessonComplete,
   markLessonInProgress,
 } from "~/services/progressService";
+import {
+  getBookmarkedLessonIds,
+  isLessonBookmarked,
+  toggleBookmark,
+} from "~/services/bookmarkService";
 import {
   getLastWatchPosition,
   calculateWatchProgress,
@@ -43,6 +48,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Bookmark,
   Circle,
   Clock,
   Github,
@@ -201,6 +207,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let lastWatchPosition = 0;
   let watchProgress = 0;
   let lessonProgressMap: Record<number, string> = {};
+  let bookmarkedLessonIds: number[] = [];
+  let isBookmarked = false;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
@@ -219,6 +227,14 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       for (const record of progressRecords) {
         lessonProgressMap[record.lessonId] = record.status;
       }
+
+      // Bookmarks for the whole course (sidebar indicators) plus this lesson's
+      // own state, which drives the toggle button.
+      bookmarkedLessonIds = getBookmarkedLessonIds({
+        userId: currentUserId,
+        courseId: course.id,
+      });
+      isBookmarked = isLessonBookmarked({ userId: currentUserId, lessonId });
 
       // Get video watch state for resume and progress display
       if (lesson.videoUrl) {
@@ -379,6 +395,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     lastWatchPosition,
     watchProgress,
     lessonProgressMap,
+    bookmarkedLessonIds,
+    isBookmarked,
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
@@ -407,6 +425,15 @@ export async function action({ params, request }: Route.ActionArgs) {
   if (intent === "mark-complete") {
     markLessonComplete(currentUserId, lessonId);
     return { success: true };
+  }
+
+  if (intent === "toggle-bookmark") {
+    if (!isUserEnrolled(currentUserId, course.id)) {
+      throw data("You must be enrolled to bookmark lessons.", { status: 403 });
+    }
+
+    const { bookmarked } = toggleBookmark({ userId: currentUserId, lessonId });
+    return { success: true, bookmarked };
   }
 
   if (intent === "submit-quiz") {
@@ -483,6 +510,8 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     lastWatchPosition,
     watchProgress,
     lessonProgressMap,
+    bookmarkedLessonIds,
+    isBookmarked,
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
@@ -493,7 +522,24 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
   const [autoplay, toggleAutoplay] = useAutoplay();
   const fetcher = useFetcher({ key: `mark-complete-${lesson.id}` });
   const quizFetcher = useFetcher({ key: `quiz-${lesson.id}` });
+  const bookmarkFetcher = useFetcher({ key: `bookmark-${lesson.id}` });
   const navigate = useNavigate();
+
+  // `formData` stays set through the revalidation that follows the action, so
+  // the flipped value holds until the loader's own answer catches up.
+  const bookmarked = bookmarkFetcher.formData ? !isBookmarked : isBookmarked;
+
+  // The loader's list is a snapshot; fold the in-flight toggle in so the
+  // sidebar and the button never disagree mid-submit.
+  const bookmarkedIds = useMemo(() => {
+    const ids = new Set(bookmarkedLessonIds);
+    if (bookmarked) {
+      ids.add(lesson.id);
+    } else {
+      ids.delete(lesson.id);
+    }
+    return ids;
+  }, [bookmarkedLessonIds, bookmarked, lesson.id]);
 
   const isMarking =
     fetcher.state !== "idle" &&
@@ -560,6 +606,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
         curriculum={curriculum}
         currentLessonId={lesson.id}
         lessonProgressMap={lessonProgressMap}
+        bookmarkedLessonIds={bookmarkedIds}
         enrolled={enrolled}
       />
 
@@ -608,6 +655,27 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
                   Open Code
                 </Button>
               </a>
+            )}
+            {enrolled && currentUserId && (
+              <bookmarkFetcher.Form method="post">
+                <input type="hidden" name="intent" value="toggle-bookmark" />
+                <Button
+                  type="submit"
+                  variant="outline"
+                  size="sm"
+                  aria-pressed={bookmarked}
+                >
+                  <Bookmark
+                    className={cn(
+                      "mr-1.5 size-4",
+                      bookmarked
+                        ? "fill-amber-500 text-amber-500"
+                        : "text-muted-foreground"
+                    )}
+                  />
+                  {bookmarked ? "Bookmarked" : "Bookmark"}
+                </Button>
+              </bookmarkFetcher.Form>
             )}
           </div>
 
@@ -766,6 +834,7 @@ function CurriculumSidebar({
   curriculum,
   currentLessonId,
   lessonProgressMap,
+  bookmarkedLessonIds,
   enrolled,
 }: {
   course: { id: number; title: string; slug: string };
@@ -776,6 +845,8 @@ function CurriculumSidebar({
   }>;
   currentLessonId: number;
   lessonProgressMap: Record<number, string>;
+  /** Read-only here — the toggle lives on the lesson body, not the sidebar. */
+  bookmarkedLessonIds: Set<number>;
   enrolled: boolean;
 }) {
   // Find which module the current lesson belongs to
@@ -817,6 +888,9 @@ function CurriculumSidebar({
         <nav className="flex-1 p-2">
           {curriculum.map((mod) => {
             const isExpanded = expandedModules.has(mod.id);
+            const hasBookmark = mod.lessons.some((l) =>
+              bookmarkedLessonIds.has(l.id)
+            );
 
             return (
               <div key={mod.id} className="mb-1">
@@ -831,6 +905,9 @@ function CurriculumSidebar({
                     )}
                   />
                   <span className="flex-1 text-left">{mod.title}</span>
+                  {hasBookmark && (
+                    <Bookmark className="size-3.5 shrink-0 fill-amber-500 text-amber-500" />
+                  )}
                 </button>
 
                 {isExpanded && (
@@ -865,7 +942,10 @@ function CurriculumSidebar({
                             ) : (
                               <Circle className="size-3.5 shrink-0" />
                             )}
-                            <span className="truncate">{l.title}</span>
+                            <span className="flex-1 truncate">{l.title}</span>
+                            {bookmarkedLessonIds.has(l.id) && (
+                              <Bookmark className="size-3.5 shrink-0 fill-amber-500 text-amber-500" />
+                            )}
                           </Link>
                         </li>
                       );
