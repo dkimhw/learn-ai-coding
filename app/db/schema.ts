@@ -41,6 +41,7 @@ export enum TeamMemberRole {
 // schema change.
 export enum NotificationType {
   Enrollment = "enrollment",
+  CommentReply = "comment_reply",
 }
 
 // ─── Tables ───

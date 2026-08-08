@@ -7,6 +7,7 @@ import {
   NotificationBell,
   type SidebarNotification,
 } from "~/components/notification-bell";
+import { canReceiveNotifications } from "~/lib/notifications";
 import {
   BarChart3,
   BookOpen,
@@ -236,9 +237,9 @@ export function Sidebar({
         <NavLink to="/" className="text-lg font-bold tracking-tight">
           Cadence
         </NavLink>
-        {/* Instructors only — students and admins have nothing to be notified
-            about yet, and an always-empty bell is just clutter. */}
-        {currentUserRole === UserRole.Instructor && (
+        {/* Same rule the layout loader used to decide whether to fetch any of
+            this, so the bell is never present with nothing behind it. */}
+        {canReceiveNotifications(currentUser) && (
           <div className="ml-auto">
             <NotificationBell
               notifications={notifications}

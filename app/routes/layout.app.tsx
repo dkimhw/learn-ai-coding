@@ -20,6 +20,7 @@ import {
   getUnreadCount,
   RECENT_NOTIFICATION_LIMIT,
 } from "~/services/notificationService";
+import { canReceiveNotifications } from "~/lib/notifications";
 
 /**
  * The course the instructor is currently working inside, read off the path
@@ -80,17 +81,18 @@ export async function loader({ request }: Route.LoaderArgs) {
       (currentUser.role === UserRole.Instructor &&
         course.instructorId === currentUser.id));
 
-  // Only instructors have a bell, so nobody else pays for the two queries. They
-  // run on every navigation, which is what keeps the badge honest without
-  // polling — see the PRD's note on scale.
-  const isInstructor = currentUser?.role === UserRole.Instructor;
-  const notifications = isInstructor
+  // Only roles that can actually receive something pay for the two queries.
+  // Instructors are told about enrollments; students about replies to their
+  // comments. Admins receive nothing yet, so they get no bell. The queries run
+  // on every navigation, which is what keeps the badge honest without polling —
+  // see the PRD's note on scale.
+  const notifications = canReceiveNotifications(currentUser)
     ? getNotifications({
         userId: currentUser.id,
         limit: RECENT_NOTIFICATION_LIMIT,
       })
     : [];
-  const unreadNotificationCount = isInstructor
+  const unreadNotificationCount = canReceiveNotifications(currentUser)
     ? getUnreadCount(currentUser.id)
     : 0;
 
