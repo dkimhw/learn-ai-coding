@@ -1,6 +1,15 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "~/db";
-import { lessonComments, users, UserRole } from "~/db/schema";
+import {
+  courses,
+  lessonComments,
+  lessons,
+  modules,
+  users,
+  NotificationType,
+  UserRole,
+} from "~/db/schema";
+import { createNotification } from "~/services/notificationService";
 
 // ─── Comment Service ───
 // Per-lesson discussion: top-level comments with one level of replies.
@@ -255,11 +264,68 @@ export function createComment(
     }
   }
 
-  return db
+  const comment = db
     .insert(lessonComments)
     .values({ lessonId, userId, body: trimmed, parentId })
     .returning()
     .get();
+
+  if (parentId !== null) {
+    notifyParentAuthorOfReply({ parentId, replierId: userId, lessonId });
+  }
+
+  return comment;
+}
+
+/**
+ * Tells the author of a comment that someone replied to it.
+ *
+ * A side effect of replying rather than something callers opt into, for the
+ * same reason enrollment notifications are: the resource route is not the only
+ * conceivable caller, and a reply nobody hears about is the gap this closes.
+ *
+ * Silent in the two cases where a notification would be noise or nonsense —
+ * replying to yourself, and a parent or lesson that cannot be resolved. Never
+ * throws: a comment that was accepted must not fail on its notification.
+ */
+function notifyParentAuthorOfReply(opts: {
+  parentId: number;
+  replierId: number;
+  lessonId: number;
+}) {
+  const parent = getCommentById(opts.parentId);
+  if (!parent) return;
+
+  // Nobody wants to be told they replied to themselves.
+  if (parent.userId === opts.replierId) return;
+
+  const replier = db
+    .select({ name: users.name })
+    .from(users)
+    .where(eq(users.id, opts.replierId))
+    .get();
+  if (!replier) return;
+
+  // The link has to name the course, which the comment only knows about two
+  // joins away.
+  const location = db
+    .select({ courseSlug: courses.slug })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .where(eq(lessons.id, opts.lessonId))
+    .get();
+  if (!location) return;
+
+  createNotification({
+    recipientUserId: parent.userId,
+    type: NotificationType.CommentReply,
+    title: "New Reply",
+    message: `${replier.name} replied to your comment`,
+    // `#discussion` is the anchor the comments card already carries, so the
+    // reply is on screen rather than somewhere below the video.
+    linkUrl: `/courses/${location.courseSlug}/lessons/${opts.lessonId}#discussion`,
+  });
 }
 
 /** Edits a comment's body and stamps `editedAt`. There is no edit time window. */

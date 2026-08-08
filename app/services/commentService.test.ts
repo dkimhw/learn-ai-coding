@@ -24,6 +24,7 @@ import {
   updateComment,
   MAX_COMMENT_LENGTH,
 } from "./commentService";
+import { getNotifications } from "./notificationService";
 
 /** Creates a module + lesson so comments have something to hang off. */
 function createLesson(title: string) {
@@ -208,6 +209,62 @@ describe("commentService", () => {
       expect(() =>
         createComment(lesson.id, base.user.id, "Reply", parent.id)
       ).toThrow(/deleted/i);
+    });
+
+    describe("reply notifications", () => {
+      it("notifies the parent comment's author", () => {
+        const parent = createComment(lesson.id, base.user.id, "Question", null);
+        createComment(lesson.id, base.instructor.id, "Answer", parent.id);
+
+        const notifications = getNotifications({ userId: base.user.id });
+
+        expect(notifications).toHaveLength(1);
+        expect(notifications[0]).toMatchObject({
+          recipientUserId: base.user.id,
+          type: schema.NotificationType.CommentReply,
+          title: "New Reply",
+          message: `${base.instructor.name} replied to your comment`,
+          linkUrl: `/courses/${base.course.slug}/lessons/${lesson.id}#discussion`,
+          isRead: false,
+        });
+      });
+
+      it("notifies a student when an instructor replies", () => {
+        const student = createStudent("asker@example.com");
+        const parent = createComment(lesson.id, student.id, "Question", null);
+        createComment(lesson.id, base.instructor.id, "Answer", parent.id);
+
+        expect(getNotifications({ userId: student.id })).toHaveLength(1);
+      });
+
+      it("does not notify you about your own reply", () => {
+        const parent = createComment(lesson.id, base.user.id, "Question", null);
+        createComment(lesson.id, base.user.id, "Following up", parent.id);
+
+        expect(getNotifications({ userId: base.user.id })).toEqual([]);
+      });
+
+      it("does not notify anyone for a top-level comment", () => {
+        createComment(lesson.id, base.user.id, "Just a thought", null);
+
+        expect(getNotifications({ userId: base.user.id })).toEqual([]);
+        expect(getNotifications({ userId: base.instructor.id })).toEqual([]);
+      });
+
+      it("notifies the parent author once per reply, not once per thread", () => {
+        const parent = createComment(lesson.id, base.user.id, "Question", null);
+        const replier = createStudent("replier@example.com");
+        createComment(lesson.id, base.instructor.id, "First", parent.id);
+        createComment(lesson.id, replier.id, "Second", parent.id);
+
+        const notifications = getNotifications({ userId: base.user.id });
+
+        expect(notifications).toHaveLength(2);
+        expect(notifications.map((n) => n.message)).toEqual([
+          `${replier.name} replied to your comment`,
+          `${base.instructor.name} replied to your comment`,
+        ]);
+      });
     });
   });
 
