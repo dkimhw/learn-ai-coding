@@ -43,6 +43,13 @@
       "when": 1785623271020,
       "tag": "0005_wakeful_the_hunter",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786206669018,
+      "tag": "0006_typical_mongoose",
+      "breakpoints": true
     }
   ]
 }

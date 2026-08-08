@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
@@ -43,29 +43,22 @@ function slugify(title: string): string {
 async function seed() {
   console.log("Seeding database...");
 
-  // Drop and recreate tables for a clean seed
-  sqlite.exec(`
-    DROP TABLE IF EXISTS lesson_comments;
-    DROP TABLE IF EXISTS video_watch_events;
-    DROP TABLE IF EXISTS quiz_answers;
-    DROP TABLE IF EXISTS quiz_attempts;
-    DROP TABLE IF EXISTS quiz_options;
-    DROP TABLE IF EXISTS quiz_questions;
-    DROP TABLE IF EXISTS quizzes;
-    DROP TABLE IF EXISTS lesson_progress;
-    DROP TABLE IF EXISTS course_reviews;
-    DROP TABLE IF EXISTS coupons;
-    DROP TABLE IF EXISTS team_members;
-    DROP TABLE IF EXISTS teams;
-    DROP TABLE IF EXISTS purchases;
-    DROP TABLE IF EXISTS enrollments;
-    DROP TABLE IF EXISTS lessons;
-    DROP TABLE IF EXISTS modules;
-    DROP TABLE IF EXISTS courses;
-    DROP TABLE IF EXISTS categories;
-    DROP TABLE IF EXISTS users;
-    DROP TABLE IF EXISTS __drizzle_migrations;
-  `);
+  // Drop every table for a clean seed, then let the migrations rebuild them.
+  // Read the list out of sqlite_master rather than hard-coding it: a hard-coded
+  // list silently goes stale the moment a migration adds a table, and the
+  // failure mode is a re-seed crashing on "table already exists" after
+  // __drizzle_migrations has been dropped.
+  const existingTables = sqlite
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`
+    )
+    .all() as { name: string }[];
+
+  sqlite.pragma("foreign_keys = OFF");
+  for (const { name } of existingTables) {
+    sqlite.exec(`DROP TABLE IF EXISTS "${name}"`);
+  }
+  sqlite.pragma("foreign_keys = ON");
 
   // Create tables using the same Drizzle migrations as the live database
   migrate(db, { migrationsFolder });
@@ -1904,17 +1897,449 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // ─── Generated cohorts ───
+  //
+  // The hand-written students above exist to make specific UI states reachable
+  // by clicking. These generated students exist to make the *analytics* legible:
+  // a drop-off curve needs enough students to have a shape, spread across enough
+  // months for the maturity filter to have something to filter, with progress
+  // that decays through the course instead of the near-universal completion the
+  // hand-written students have — which is the one distribution that makes every
+  // chart flat and every detector look like it is broken.
+  //
+  // Two contrasting courses:
+  //   - Introduction to TypeScript — high volume, ~60 students over ~6 months.
+  //   - Building REST APIs — low volume, ~8 students, deliberately below the
+  //     analytics verdict threshold so the "not enough data yet" state is
+  //     reachable without editing constants.
+  //
+  // Everything here is deterministic — a seeded PRNG, never Math.random — so a
+  // re-seed reproduces the same curve. A chart that looks wrong stays wrong
+  // until the code changes, which is the only way to tell a broken detector from
+  // an unlucky sample.
+  //
+  // The high-volume course carries a deliberate drop-off cliff at a known
+  // lesson (see CLIFF_LESSON_INDEX). It is not decoration: worst-lesson
+  // detection producing plausible output is not the same as producing the right
+  // answer, and a planted anomaly is the only way to tell those apart. The seed
+  // prints which lesson it planted, so the page can be checked against it.
+  //
+  // Deliberately NOT planted here: the comment spike. That arrives alongside the
+  // discussion-rate flag that is supposed to find it.
+
+  function makeRng(seed: number): () => number {
+    let state = seed >>> 0;
+    return function next() {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const rng = makeRng(20260808);
+
+  const firstNames = [
+    "Ava", "Noah", "Mia", "Ethan", "Isla", "Leo", "Zara",
+    "Felix", "Nina", "Omar", "Priya", "Diego", "Hana", "Theo",
+  ];
+  const lastNames = [
+    "Okafor", "Nguyen", "Silva", "Kowalski", "Haddad", "Berg", "Ibrahim", "Rossi",
+  ];
+
+  let generatedCount = 0;
+
+  function createGeneratedStudent(enrolledDaysAgo: number) {
+    const n = generatedCount++;
+    const first = firstNames[n % firstNames.length];
+    const last =
+      lastNames[Math.floor(n / firstNames.length) % lastNames.length];
+    const handle = `${first}.${last}`.toLowerCase();
+
+    return db
+      .insert(schema.users)
+      .values({
+        name: `${first} ${last}`,
+        email: `${handle}@student.dev`,
+        role: UserRole.Student,
+        avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=${handle}`,
+        // Accounts predate the enrollment they were created for.
+        createdAt: daysAgo(enrolledDaysAgo + 2),
+      })
+      .returning()
+      .get();
+  }
+
+  // Odds that a student who reached lesson N also reaches lesson N+1. Applied
+  // per lesson, this produces the exponential thinning a real course shows
+  // rather than a flat line — at 0.93 across 19 lessons roughly a quarter of
+  // mature students see the end.
+  const REACH_SURVIVAL = 0.93;
+
+  // Share of students who enroll and never open a lesson. This is its own
+  // finding on the analytics page (an onboarding failure, not a content one),
+  // so the seed has to produce a visible 0% band.
+  const NEVER_STARTED_RATE = 0.12;
+
+  // Roughly how many lessons a motivated student gets through per week. Recent
+  // enrollees are capped by this, because a student who signed up nine days ago
+  // has not abandoned lesson 12 — they have not arrived at it yet. Seeding them
+  // as though they had would erase the very effect the maturity filter exists to
+  // correct for.
+  const LESSONS_PER_WEEK = 2;
+
+  // ─── The planted cliff ───
+  //
+  // Zero-based, so index 6 is the seventh lesson of the course in course order.
+  // Students who reach it stop there far more often than the ordinary survival
+  // rate would produce, which makes it the largest fall between consecutive
+  // lessons by a wide margin — the answer the worst-lesson detector has to find.
+  //
+  // It sits deep enough to be a real finding and shallow enough that well over
+  // VERDICT_MIN_STUDENTS mature students reach it, so the verdict actually
+  // fires rather than being withheld.
+  const CLIFF_LESSON_INDEX = 6;
+
+  /** Odds a student who reached the cliff lesson carries on past it. */
+  const CLIFF_SURVIVAL = 0.45;
+
+  function enrollGeneratedStudent({
+    courseId,
+    lessonIds,
+    enrolledDaysAgo,
+    listPrice,
+    cliffLessonIndex,
+  }: {
+    courseId: number;
+    lessonIds: number[];
+    enrolledDaysAgo: number;
+    listPrice: number;
+    /** Zero-based lesson most students stop at, if this course has one. */
+    cliffLessonIndex?: number;
+  }) {
+    const student = createGeneratedStudent(enrolledDaysAgo);
+
+    db.insert(schema.enrollments)
+      .values({
+        userId: student.id,
+        courseId,
+        enrolledAt: daysAgo(enrolledDaysAgo),
+      })
+      .run();
+
+    // Regional pricing, so gross collected is not just list price times sales.
+    const pppRoll = rng();
+    const purchase =
+      pppRoll < 0.15
+        ? { pricePaid: Math.round(listPrice * 0.5), country: "IN" }
+        : pppRoll < 0.25
+          ? { pricePaid: Math.round(listPrice * 0.6), country: "BR" }
+          : { pricePaid: listPrice, country: "US" };
+
+    db.insert(schema.purchases)
+      .values({
+        userId: student.id,
+        courseId,
+        pricePaid: purchase.pricePaid,
+        country: purchase.country,
+        createdAt: daysAgo(enrolledDaysAgo),
+      })
+      .run();
+
+    // How far through the course this student got. Geometric in the per-lesson
+    // survival rate, then capped by how long they have actually been enrolled.
+    let depth = 0;
+    if (rng() >= NEVER_STARTED_RATE) {
+      depth = Math.min(
+        lessonIds.length,
+        1 + Math.floor(Math.log(1 - rng()) / Math.log(REACH_SURVIVAL))
+      );
+      const timeCap = Math.max(
+        1,
+        Math.ceil((enrolledDaysAgo / 7) * LESSONS_PER_WEEK)
+      );
+      depth = Math.min(depth, timeCap);
+
+      // The cliff: of the students who get as far as this lesson, most stop on
+      // it rather than going on. Applied after the time cap so it only holds
+      // back students who would otherwise have gone further.
+      const reachedCliff =
+        cliffLessonIndex !== undefined && depth > cliffLessonIndex;
+      if (reachedCliff && rng() >= CLIFF_SURVIVAL) {
+        depth = cliffLessonIndex + 1;
+      }
+    }
+
+    if (depth === 0) return;
+
+    // Completions are spread across the first 70% of the time since enrollment,
+    // so nothing is stamped in the future and a student's last lesson is not
+    // always "today".
+    const pace = (enrolledDaysAgo * 0.7) / depth;
+
+    for (let i = 0; i < depth; i++) {
+      const atFrontier = i === depth - 1 && depth < lessonIds.length;
+      // Most students stall on the lesson that stopped them rather than
+      // completing it — that gap between reached and completed is the signal.
+      if (atFrontier && rng() < 0.8) {
+        markInProgress(student.id, lessonIds[i]);
+      } else {
+        markComplete(
+          student.id,
+          lessonIds[i],
+          Math.max(0, Math.round(enrolledDaysAgo - (i + 1) * pace))
+        );
+      }
+    }
+  }
+
+  // Cohorts are keyed by the oldest day in the month they represent; each
+  // student lands somewhere in the 28 days after it. The newest cohort sits
+  // inside 30 days on purpose, so drop-off has both mature and too-recent
+  // students to tell apart.
+  function seedCohorts({
+    courseId,
+    lessonIds,
+    listPrice,
+    cohorts,
+    cliffLessonIndex,
+  }: {
+    courseId: number;
+    lessonIds: number[];
+    listPrice: number;
+    cohorts: { startDaysAgo: number; size: number }[];
+    cliffLessonIndex?: number;
+  }) {
+    let seeded = 0;
+    for (const cohort of cohorts) {
+      for (let i = 0; i < cohort.size; i++) {
+        enrollGeneratedStudent({
+          courseId,
+          lessonIds,
+          listPrice,
+          cliffLessonIndex,
+          enrolledDaysAgo: cohort.startDaysAgo - Math.floor(rng() * 28),
+        });
+        seeded++;
+      }
+    }
+    return seeded;
+  }
+
+  // Growing sales, so the newest cohorts are the largest — which is exactly the
+  // shape that makes an unfiltered drop-off curve look like the course fell
+  // apart at the end.
+  const highVolumeSeeded = seedCohorts({
+    courseId: course1.id,
+    lessonIds: course1LessonIds,
+    listPrice: course1.price,
+    cliffLessonIndex: CLIFF_LESSON_INDEX,
+    cohorts: [
+      { startDaysAgo: 180, size: 6 },
+      { startDaysAgo: 150, size: 7 },
+      { startDaysAgo: 120, size: 9 },
+      { startDaysAgo: 90, size: 10 },
+      { startDaysAgo: 60, size: 12 },
+      { startDaysAgo: 30, size: 12 },
+    ],
+  });
+
+  const cliffLesson = db
+    .select({ title: schema.lessons.title })
+    .from(schema.lessons)
+    .where(eq(schema.lessons.id, course1LessonIds[CLIFF_LESSON_INDEX]))
+    .get();
+
+  console.log(
+    `Created ${highVolumeSeeded} generated students on "${course1.title}" across 6 monthly cohorts (${highVolumeSeeded + 4} enrolled in total).`
+  );
+  console.log(
+    `  Planted drop-off cliff at lesson ${CLIFF_LESSON_INDEX + 1}, "${cliffLesson?.title}" — the analytics page should name this lesson.`
+  );
+
+  const lowVolumeSeeded = seedCohorts({
+    courseId: course2.id,
+    lessonIds: course2LessonIds,
+    listPrice: course2.price,
+    cohorts: [
+      { startDaysAgo: 90, size: 2 },
+      { startDaysAgo: 60, size: 2 },
+      { startDaysAgo: 30, size: 1 },
+    ],
+  });
+
+  console.log(
+    `Created ${lowVolumeSeeded} generated students on "${course2.title}" (${lowVolumeSeeded + 3} enrolled in total — deliberately below the verdict threshold).`
+  );
+
+  // ─── The planted comment spike ───
+  //
+  // Deliberately a different lesson from the cliff, so the two detectors cannot
+  // be confirmed by the same coincidence. Like the cliff, it is a fixture and
+  // not decoration: a discussion-rate flag that produces plausible output is not
+  // the same as one that fires on the right lesson, and seed data with no known
+  // anomaly makes a broken detector look fine.
+  //
+  // A scatter of ordinary comments goes down first. Without it every other
+  // lesson sits at a rate of zero, the course median is zero, and the flag never
+  // has to do the comparison it exists to do.
+  const SPIKE_LESSON_INDEX = 4;
+  const SPIKE_COMMENTS = 16;
+
+  /**
+   * Students who both reached the lesson and are old enough to count towards
+   * the drop-off sample — the same population the discussion rate is computed
+   * over, so a seeded comment always has a student behind it in the denominator.
+   */
+  function commentersFor(lessonId: number, limit: number) {
+    return db
+      .select({ userId: schema.lessonProgress.userId })
+      .from(schema.lessonProgress)
+      .innerJoin(
+        schema.enrollments,
+        and(
+          eq(schema.enrollments.userId, schema.lessonProgress.userId),
+          eq(schema.enrollments.courseId, course1.id)
+        )
+      )
+      .where(
+        and(
+          eq(schema.lessonProgress.lessonId, lessonId),
+          lt(schema.enrollments.enrolledAt, daysAgo(60))
+        )
+      )
+      .limit(limit)
+      .all();
+  }
+
+  const ordinaryQuestions = [
+    "Had to rewatch this one but it clicked in the end.",
+    "Does this still apply on the latest compiler version?",
+    "Small typo in the slide at 4:20 — should be `readonly`.",
+    "Anyone else find the second example easier than the first?",
+  ];
+
+  const confusedQuestions = [
+    "I've read this three times and I still can't tell when to use which.",
+    "The example compiles for me but I don't understand *why* it compiles.",
+    "Is the second half of this lesson assuming something from a later module?",
+    "Completely lost from the tuple example onwards. Can anyone rephrase it?",
+    "What happens if the array is empty? The lesson doesn't say.",
+    "This is the first bit of the course I've had to go and Google.",
+  ];
+
+  let scatteredComments = 0;
+  course1LessonIds.forEach((lessonId, index) => {
+    if (index === SPIKE_LESSON_INDEX || index % 2 === 1) return;
+
+    for (const commenter of commentersFor(lessonId, 1)) {
+      comment(
+        lessonId,
+        commenter.userId,
+        ordinaryQuestions[index % ordinaryQuestions.length],
+        null,
+        20 + index
+      );
+      scatteredComments++;
+    }
+  });
+
+  const spikeLessonId = course1LessonIds[SPIKE_LESSON_INDEX];
+  const spikeCommenters = commentersFor(spikeLessonId, SPIKE_COMMENTS);
+
+  spikeCommenters.forEach((commenter, index) => {
+    comment(
+      spikeLessonId,
+      commenter.userId,
+      confusedQuestions[index % confusedQuestions.length],
+      null,
+      30 - Math.floor(index / 2)
+    );
+  });
+
+  const spikeLesson = db
+    .select({ title: schema.lessons.title })
+    .from(schema.lessons)
+    .where(eq(schema.lessons.id, spikeLessonId))
+    .get();
+
+  console.log(
+    `Created ${scatteredComments} scattered comments across "${course1.title}" to give the course a normal to be measured against.`
+  );
+  console.log(
+    `  Planted comment spike at lesson ${SPIKE_LESSON_INDEX + 1}, "${spikeLesson?.title}" (${spikeCommenters.length} comments) — the analytics page should flag this lesson.`
+  );
+
+  // ─── Enrollment completion ───
+  //
+  // Enrollments are inserted above without a completion stamp, and lesson
+  // progress is written straight to the table rather than through
+  // progressService, so nothing has derived completion yet. This mirrors what
+  // the backfill script does to a live database: any student who completed
+  // every lesson in a course has finished it.
+
+  let seededCompletions = 0;
+
+  for (const enrollment of db
+    .select()
+    .from(schema.enrollments)
+    .where(isNull(schema.enrollments.completedAt))
+    .all()) {
+    const courseLessonIds = db
+      .select({ id: schema.lessons.id })
+      .from(schema.lessons)
+      .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+      .where(eq(schema.modules.courseId, enrollment.courseId))
+      .all()
+      .map((l) => l.id);
+
+    if (courseLessonIds.length === 0) continue;
+
+    const completedLessons = db
+      .select({ lessonId: schema.lessonProgress.lessonId })
+      .from(schema.lessonProgress)
+      .where(
+        and(
+          eq(schema.lessonProgress.userId, enrollment.userId),
+          eq(schema.lessonProgress.status, LessonProgressStatus.Completed),
+          inArray(schema.lessonProgress.lessonId, courseLessonIds)
+        )
+      )
+      .all();
+
+    if (completedLessons.length < courseLessonIds.length) continue;
+
+    db.update(schema.enrollments)
+      .set({ completedAt: new Date().toISOString() })
+      .where(eq(schema.enrollments.id, enrollment.id))
+      .run();
+    seededCompletions++;
+  }
+
+  console.log(
+    `Marked ${seededCompletions} enrollment(s) complete from lesson progress.`
+  );
+
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(
+    `  Users: ${9 + generatedCount} (1 admin, 2 instructors, ${6 + generatedCount} students)`
+  );
   console.log("  Categories: 5");
   console.log(
     `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
+  console.log(
+    `  Enrollments: ${7 + generatedCount} (${highVolumeSeeded + 4} high-volume, ${lowVolumeSeeded + 3} low-volume)`
+  );
+  console.log(
+    `  Purchases: ${6 + generatedCount} (${5 + generatedCount} individual + 1 team)`
+  );
   console.log("  Teams: 1 (with 5 coupons)");
-  console.log("  Lesson comments: 15 across 5 threads");
+  console.log(
+    `  Lesson comments: ${15 + scatteredComments + spikeCommenters.length} (15 hand-written across 5 threads, the rest generated)`
+  );
 }
 
 seed().catch(console.error);

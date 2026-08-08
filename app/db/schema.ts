@@ -36,6 +36,13 @@ export enum TeamMemberRole {
   Member = "member",
 }
 
+// What happened, not what to render. The notification row already carries its
+// own title/message/linkUrl, so a new kind of event is a new member here and no
+// schema change.
+export enum NotificationType {
+  Enrollment = "enrollment",
+}
+
 // ─── Tables ───
 
 export const users = sqliteTable("users", {
@@ -334,6 +341,39 @@ export const lessonBookmarks = sqliteTable(
     uniqueIndex("lesson_bookmarks_user_lesson_unique").on(
       table.userId,
       table.lessonId
+    ),
+  ]
+);
+
+// In-app notifications, one row per recipient per event.
+//
+// The row is rendered text — title, message, and the place to go — rather than
+// a reference to the thing that happened. That is deliberate: a notification is
+// a record of what was true when the event fired, so renaming a course later
+// does not rewrite the instructor's history, and the dropdown never has to join
+// against five different event tables to say what happened.
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    recipientUserId: integer("recipient_user_id")
+      .notNull()
+      .references(() => users.id),
+    type: text("type").notNull().$type<NotificationType>(),
+    title: text("title").notNull(),
+    message: text("message").notNull(),
+    linkUrl: text("link_url").notNull(),
+    isRead: integer("is_read", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [
+    // Every read is "this user's, newest first" — the dropdown and the unread
+    // badge both start here.
+    index("notifications_recipient_created").on(
+      table.recipientUserId,
+      table.createdAt
     ),
   ]
 );

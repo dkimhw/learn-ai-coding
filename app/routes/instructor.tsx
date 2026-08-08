@@ -2,12 +2,22 @@ import { Link } from "react-router";
 import type { Route } from "./+types/instructor";
 import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
 import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
+import { getWorstDropOff } from "~/services/analyticsService";
+import type { WorstDropOff } from "~/services/analyticsService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
-import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  BarChart3,
+  BookOpen,
+  GraduationCap,
+  Plus,
+  TrendingDown,
+  Users,
+} from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
@@ -41,6 +51,10 @@ export async function loader({ request }: Route.LoaderArgs) {
   const coursesWithStats = instructorCourses.map((course) => {
     const lessonCount = getLessonCountForCourse(course.id);
     const enrollmentCount = getEnrollmentCountForCourse(course.id);
+    // The narrow read, not a full analytics payload per card — and skipped
+    // entirely for a course nobody has enrolled in, which has nothing to say.
+    const worstDropOff =
+      enrollmentCount > 0 ? getWorstDropOff(course.id) : null;
 
     return {
       id: course.id,
@@ -51,6 +65,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       coverImageUrl: course.coverImageUrl,
       lessonCount,
       enrollmentCount,
+      worstDropOff,
       createdAt: course.createdAt,
       updatedAt: course.updatedAt,
     };
@@ -82,6 +97,41 @@ function statusBadge(status: string) {
     default:
       return null;
   }
+}
+
+/**
+ * The course grid's one interpretive claim: where this course loses the most
+ * students, put in front of an instructor who was not thinking about analytics.
+ *
+ * It renders only above the verdict threshold. Below it, and for a course with
+ * no students at all, the card falls back to the neutral Analytics link in the
+ * footer — nobody should be sent chasing a problem that is really three people,
+ * and a brand-new course's card stays clean.
+ */
+function DropOffHook({
+  courseId,
+  worstDropOff,
+}: {
+  courseId: number;
+  worstDropOff: WorstDropOff | null;
+}) {
+  if (!worstDropOff?.meetsThreshold) return null;
+
+  return (
+    <Link
+      to={`/instructor/${courseId}/analytics`}
+      className="mt-3 flex items-start gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-2 text-sm text-amber-900 hover:bg-amber-100 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/70"
+    >
+      <TrendingDown className="mt-0.5 size-4 shrink-0" />
+      <span>
+        <span className="font-medium">
+          {worstDropOff.percentage}% of students stop at lesson{" "}
+          {worstDropOff.order}
+        </span>
+        <span className="block text-xs opacity-80">{worstDropOff.title}</span>
+      </span>
+    </Link>
+  );
 }
 
 export function HydrateFallback() {
@@ -205,12 +255,32 @@ export default function InstructorDashboard({
                     </span>
                   </div>
                 </div>
+                <DropOffHook
+                  courseId={course.id}
+                  worstDropOff={course.worstDropOff}
+                />
               </CardContent>
-              <CardFooter>
-                <Link to={`/instructor/${course.id}`} className="w-full">
+              {/* Both actions get the same width and the pair sits centred:
+                  editing and reading a course are equally likely next steps, so
+                  neither earns the emphasis of a wider button. */}
+              <CardFooter className="justify-center gap-3">
+                <Link to={`/instructor/${course.id}`} className="flex-1">
                   <Button className="w-full" variant="outline">
                     <BookOpen className="mr-2 size-4" />
                     Edit Course
+                  </Button>
+                </Link>
+                <Link
+                  to={`/instructor/${course.id}/analytics`}
+                  className="flex-1"
+                >
+                  <Button
+                    className="w-full"
+                    variant="outline"
+                    aria-label="Course analytics"
+                  >
+                    <BarChart3 className="mr-2 size-4" />
+                    Analytics
                   </Button>
                 </Link>
               </CardFooter>

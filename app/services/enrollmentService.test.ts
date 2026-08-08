@@ -24,7 +24,39 @@ import {
   getUserEnrolledCourses,
   getCourseEnrolledStudents,
   markEnrollmentComplete,
+  syncEnrollmentCompletion,
+  backfillEnrollmentCompletions,
 } from "./enrollmentService";
+import { getNotifications } from "./notificationService";
+
+// Helper to create a module with lessons in the test db
+function createLessons(courseId: number, count: number) {
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: "Module 1", position: 1 })
+    .returning()
+    .get();
+
+  return Array.from({ length: count }, (_, i) =>
+    testDb
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: `Lesson ${i + 1}`, position: i + 1 })
+      .returning()
+      .get()
+  );
+}
+
+function completeLesson(userId: number, lessonId: number) {
+  testDb
+    .insert(schema.lessonProgress)
+    .values({
+      userId,
+      lessonId,
+      status: schema.LessonProgressStatus.Completed,
+      completedAt: new Date().toISOString(),
+    })
+    .run();
+}
 
 describe("enrollmentService", () => {
   beforeEach(() => {
@@ -77,6 +109,28 @@ describe("enrollmentService", () => {
     it("accepts sendEmail parameter without error", () => {
       const enrollment = enrollUser(base.user.id, base.course.id, true, false);
       expect(enrollment).toBeDefined();
+    });
+
+    it("notifies the course's instructor", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      const notifications = getNotifications({ userId: base.instructor.id });
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toMatchObject({
+        recipientUserId: base.instructor.id,
+        type: schema.NotificationType.Enrollment,
+        title: "New Enrollment",
+        message: `${base.user.name} enrolled in ${base.course.title}`,
+        linkUrl: `/instructor/${base.course.id}/students`,
+        isRead: false,
+      });
+    });
+
+    it("does not notify the student who enrolled", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      expect(getNotifications({ userId: base.user.id })).toEqual([]);
     });
   });
 
@@ -248,6 +302,163 @@ describe("enrollmentService", () => {
 
     it("returns empty array when course has no enrollments", () => {
       expect(getCourseEnrolledStudents(base.course.id)).toHaveLength(0);
+    });
+  });
+
+  describe("syncEnrollmentCompletion", () => {
+    it("marks the enrollment complete once every lesson is completed", () => {
+      const lessons = createLessons(base.course.id, 3);
+      enrollUser(base.user.id, base.course.id, false, false);
+      lessons.forEach((l) => completeLesson(base.user.id, l.id));
+
+      const result = syncEnrollmentCompletion({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).not.toBeNull();
+    });
+
+    it("leaves the enrollment incomplete while a lesson is outstanding", () => {
+      const lessons = createLessons(base.course.id, 3);
+      enrollUser(base.user.id, base.course.id, false, false);
+      completeLesson(base.user.id, lessons[0].id);
+      completeLesson(base.user.id, lessons[1].id);
+
+      const result = syncEnrollmentCompletion({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).toBeNull();
+    });
+
+    it("does not count in-progress lessons as completed", () => {
+      const lessons = createLessons(base.course.id, 2);
+      enrollUser(base.user.id, base.course.id, false, false);
+      completeLesson(base.user.id, lessons[0].id);
+      testDb
+        .insert(schema.lessonProgress)
+        .values({
+          userId: base.user.id,
+          lessonId: lessons[1].id,
+          status: schema.LessonProgressStatus.InProgress,
+        })
+        .run();
+
+      const result = syncEnrollmentCompletion({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).toBeNull();
+    });
+
+    it("does not re-stamp an already-complete enrollment", () => {
+      const lessons = createLessons(base.course.id, 1);
+      enrollUser(base.user.id, base.course.id, false, false);
+      completeLesson(base.user.id, lessons[0].id);
+
+      const first = syncEnrollmentCompletion({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+      const second = syncEnrollmentCompletion({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(second!.completedAt).toBe(first!.completedAt);
+    });
+
+    it("never completes a course that has no lessons", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      const result = syncEnrollmentCompletion({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).toBeNull();
+    });
+
+    it("returns undefined when the user is not enrolled", () => {
+      expect(
+        syncEnrollmentCompletion({
+          userId: base.user.id,
+          courseId: base.course.id,
+        })
+      ).toBeUndefined();
+    });
+  });
+
+  describe("backfillEnrollmentCompletions", () => {
+    it("marks existing enrollments that already meet the condition", () => {
+      const lessons = createLessons(base.course.id, 2);
+      enrollUser(base.user.id, base.course.id, false, false);
+      lessons.forEach((l) => completeLesson(base.user.id, l.id));
+
+      const result = backfillEnrollmentCompletions();
+
+      expect(result).toEqual({ scanned: 1, completed: 1 });
+      expect(
+        findEnrollment(base.user.id, base.course.id)!.completedAt
+      ).not.toBeNull();
+    });
+
+    it("leaves enrollments that do not meet the condition alone", () => {
+      const lessons = createLessons(base.course.id, 2);
+      enrollUser(base.user.id, base.course.id, false, false);
+      completeLesson(base.user.id, lessons[0].id);
+
+      const result = backfillEnrollmentCompletions();
+
+      expect(result).toEqual({ scanned: 1, completed: 0 });
+      expect(
+        findEnrollment(base.user.id, base.course.id)!.completedAt
+      ).toBeNull();
+    });
+
+    it("is safe to re-run and does not re-stamp", () => {
+      const lessons = createLessons(base.course.id, 1);
+      enrollUser(base.user.id, base.course.id, false, false);
+      completeLesson(base.user.id, lessons[0].id);
+
+      backfillEnrollmentCompletions();
+      const stampedAt = findEnrollment(
+        base.user.id,
+        base.course.id
+      )!.completedAt;
+
+      const second = backfillEnrollmentCompletions();
+
+      expect(second).toEqual({ scanned: 0, completed: 0 });
+      expect(findEnrollment(base.user.id, base.course.id)!.completedAt).toBe(
+        stampedAt
+      );
+    });
+
+    it("completes one student without completing another on the same course", () => {
+      const lessons = createLessons(base.course.id, 2);
+      const other = testDb
+        .insert(schema.users)
+        .values({
+          name: "Other Student",
+          email: "other@example.com",
+          role: schema.UserRole.Student,
+        })
+        .returning()
+        .get();
+
+      enrollUser(base.user.id, base.course.id, false, false);
+      enrollUser(other.id, base.course.id, false, false);
+      lessons.forEach((l) => completeLesson(base.user.id, l.id));
+      completeLesson(other.id, lessons[0].id);
+
+      const result = backfillEnrollmentCompletions();
+
+      expect(result).toEqual({ scanned: 2, completed: 1 });
+      expect(findEnrollment(other.id, base.course.id)!.completedAt).toBeNull();
     });
   });
 });

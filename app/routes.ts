@@ -20,6 +20,9 @@ export default [
     ),
     route("instructor", "routes/instructor.tsx"),
     route("instructor/new", "routes/instructor.new.tsx"),
+    // Static, so it outranks `instructor/:courseId` rather than being read as a
+    // course called "analytics".
+    route("instructor/analytics", "routes/instructor.analytics.tsx"),
     route("instructor/:courseId", "routes/instructor.$courseId.tsx"),
     route(
       "instructor/:courseId/lessons/:lessonId",
@@ -37,6 +40,10 @@ export default [
       "instructor/:courseId/students",
       "routes/instructor.$courseId.students.tsx"
     ),
+    route(
+      "instructor/:courseId/analytics",
+      "routes/instructor.$courseId.analytics.tsx"
+    ),
     route("admin/users", "routes/admin.users.tsx"),
     route("admin/courses", "routes/admin.courses.tsx"),
     route("admin/categories", "routes/admin.categories.tsx"),
@@ -50,6 +57,16 @@ export default [
   route("api/logout", "routes/api.logout.ts"),
   route("api/video-tracking", "routes/api.video-tracking.ts"),
   route("api/set-dev-country", "routes/api.set-dev-country.ts"),
+  // Mutations only. Outside the app layout because the fetcher that calls them
+  // revalidates the layout loader itself — the badge count is what changed.
+  route(
+    "api/notifications/mark-read",
+    "routes/api.notifications.mark-read.ts"
+  ),
+  route(
+    "api/notifications/mark-all-read",
+    "routes/api.notifications.mark-all-read.ts"
+  ),
   // Resource route (mutations only), deliberately outside the app layout so a
   // comment submission does not re-run the layout loader.
   route(

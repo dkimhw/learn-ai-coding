@@ -8,6 +8,7 @@ import {
   enrollments,
   LessonProgressStatus,
 } from "~/db/schema";
+import { syncEnrollmentCompletion } from "~/services/enrollmentService";
 
 // ─── Progress Service ───
 // Handles lesson completion tracking and course progress calculation.
@@ -55,31 +56,50 @@ export function getLessonProgressForCourse(userId: number, courseId: number) {
     .all();
 }
 
+function getCourseIdForLesson(lessonId: number) {
+  const result = db
+    .select({ courseId: modules.courseId })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(lessons.id, lessonId))
+    .get();
+
+  return result?.courseId ?? null;
+}
+
 export function markLessonComplete(userId: number, lessonId: number) {
   const existing = getLessonProgress(userId, lessonId);
 
-  if (existing) {
-    return db
-      .update(lessonProgress)
-      .set({
-        status: LessonProgressStatus.Completed,
-        completedAt: new Date().toISOString(),
-      })
-      .where(eq(lessonProgress.id, existing.id))
-      .returning()
-      .get();
+  const progress = existing
+    ? db
+        .update(lessonProgress)
+        .set({
+          status: LessonProgressStatus.Completed,
+          completedAt: new Date().toISOString(),
+        })
+        .where(eq(lessonProgress.id, existing.id))
+        .returning()
+        .get()
+    : db
+        .insert(lessonProgress)
+        .values({
+          userId,
+          lessonId,
+          status: LessonProgressStatus.Completed,
+          completedAt: new Date().toISOString(),
+        })
+        .returning()
+        .get();
+
+  // Completing the final outstanding lesson completes the course. This lives
+  // here rather than in the route so every caller — routes, seeds, tests —
+  // gets the same consistent notion of completion.
+  const courseId = getCourseIdForLesson(lessonId);
+  if (courseId !== null) {
+    syncEnrollmentCompletion({ userId, courseId });
   }
 
-  return db
-    .insert(lessonProgress)
-    .values({
-      userId,
-      lessonId,
-      status: LessonProgressStatus.Completed,
-      completedAt: new Date().toISOString(),
-    })
-    .returning()
-    .get();
+  return progress;
 }
 
 export function markLessonInProgress(userId: number, lessonId: number) {

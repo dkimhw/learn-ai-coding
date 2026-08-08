@@ -1,9 +1,14 @@
-import { NavLink, Form } from "react-router";
+import { Link, NavLink, Form, useLocation } from "react-router";
 import { useState, useEffect } from "react";
 import { cn } from "~/lib/utils";
 import { UserRole } from "~/db/schema";
 import { UserAvatar } from "~/components/user-avatar";
 import {
+  NotificationBell,
+  type SidebarNotification,
+} from "~/components/notification-bell";
+import {
+  BarChart3,
   BookOpen,
   LayoutDashboard,
   GraduationCap,
@@ -34,10 +39,20 @@ interface RecentCourse {
   progress: number;
 }
 
+/** The course the viewer is currently working inside, if any. */
+interface CurrentCourse {
+  id: number;
+  title: string;
+}
+
 interface SidebarProps {
   currentUser: CurrentUser | null;
+  currentCourse?: CurrentCourse | null;
   recentCourses?: RecentCourse[];
   isTeamAdmin?: boolean;
+  /** The viewer's five most recent notifications; empty for non-instructors. */
+  notifications?: SidebarNotification[];
+  unreadNotificationCount?: number;
 }
 
 interface NavItem {
@@ -45,6 +60,15 @@ interface NavItem {
   to: string;
   icon: React.ReactNode;
   roles: UserRole[] | "all";
+  /**
+   * Match this path exactly rather than as a prefix.
+   *
+   * Needed by any item whose path is a prefix of a sibling's: `/instructor`
+   * prefixes `/instructor/analytics`, so without this both light up at once and
+   * neither tells you where you are. Items whose children are *inside* them —
+   * `/courses` and a course detail page — leave it off on purpose.
+   */
+  end?: boolean;
 }
 
 const navItems: NavItem[] = [
@@ -65,6 +89,17 @@ const navItems: NavItem[] = [
     to: "/instructor",
     icon: <GraduationCap className="size-4" />,
     roles: [UserRole.Instructor],
+    // The course grid itself. Inside a course the sidebar's course section says
+    // where you are, so this does not need to claim it too.
+    end: true,
+  },
+  {
+    // All courses pooled. Reachable without first knowing which course you
+    // want, which the per-course page cannot be.
+    label: "Analytics",
+    to: "/instructor/analytics",
+    icon: <BarChart3 className="size-4" />,
+    roles: [UserRole.Instructor, UserRole.Admin],
   },
   {
     label: "Manage Users",
@@ -92,10 +127,92 @@ function isVisible(item: NavItem, role: UserRole | null): boolean {
   return item.roles.includes(role);
 }
 
+/** The sidebar's one link treatment, shared so every section matches. */
+function navLinkClass(isActive: boolean): string {
+  return cn(
+    "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+    isActive
+      ? "bg-sidebar-accent text-sidebar-accent-foreground"
+      : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+  );
+}
+
+/**
+ * The three views of a course, offered wherever the instructor already is.
+ *
+ * Moving between the editor, the roster, and analytics used to mean a round
+ * trip through `/instructor`. The section is course-scoped: it renders only
+ * when the layout has resolved a current course, which happens only on
+ * `/instructor/:courseId/*` and only for someone allowed to see that course.
+ *
+ * Editor stays marked active on a lesson or module route too, because those are
+ * the editor — the instructor should never be looking at a sidebar that claims
+ * they are nowhere.
+ */
+function CourseSection({ course }: { course: CurrentCourse }) {
+  const { pathname } = useLocation();
+  const base = `/instructor/${course.id}`;
+
+  const links = [
+    {
+      label: "Editor",
+      to: base,
+      icon: <BookOpen className="size-4" />,
+      isActive:
+        !pathname.startsWith(`${base}/students`) &&
+        !pathname.startsWith(`${base}/analytics`),
+    },
+    {
+      label: "Students",
+      to: `${base}/students`,
+      icon: <Users className="size-4" />,
+      isActive: pathname.startsWith(`${base}/students`),
+    },
+    {
+      label: "Analytics",
+      to: `${base}/analytics`,
+      icon: <BarChart3 className="size-4" />,
+      isActive: pathname.startsWith(`${base}/analytics`),
+    },
+  ];
+
+  return (
+    <div className="border-t border-sidebar-border p-3">
+      <div className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-sidebar-foreground/50">
+        Course
+      </div>
+      <div className="mb-1 truncate px-3 text-sm font-medium" title={course.title}>
+        {course.title}
+      </div>
+      <div className="space-y-1">
+        {links.map((link) => (
+          // A plain Link carrying the sidebar's own NavLink styling, because
+          // active state here is not a path match. `/instructor/:id` prefixes
+          // both of its siblings, so NavLink would light Editor up on the
+          // roster and on analytics; with `end` it would go dark on a lesson,
+          // which is still the editor. The rule is ours, so the markup is too.
+          <Link
+            key={link.to}
+            to={link.to}
+            aria-current={link.isActive ? "page" : undefined}
+            className={navLinkClass(link.isActive)}
+          >
+            {link.icon}
+            {link.label}
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function Sidebar({
   currentUser,
+  currentCourse = null,
   recentCourses = [],
   isTeamAdmin = false,
+  notifications = [],
+  unreadNotificationCount = 0,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
   const [isDark, setIsDark] = useState(false);
@@ -119,6 +236,16 @@ export function Sidebar({
         <NavLink to="/" className="text-lg font-bold tracking-tight">
           Cadence
         </NavLink>
+        {/* Instructors only — students and admins have nothing to be notified
+            about yet, and an always-empty bell is just clutter. */}
+        {currentUserRole === UserRole.Instructor && (
+          <div className="ml-auto">
+            <NotificationBell
+              notifications={notifications}
+              unreadCount={unreadNotificationCount}
+            />
+          </div>
+        )}
       </div>
 
       <nav className="flex-1 space-y-1 p-3">
@@ -128,14 +255,8 @@ export function Sidebar({
             <NavLink
               key={item.to}
               to={item.to}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                  isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                )
-              }
+              end={item.end}
+              className={({ isActive }) => navLinkClass(isActive)}
             >
               {item.icon}
               {item.label}
@@ -144,20 +265,15 @@ export function Sidebar({
         {isTeamAdmin && (
           <NavLink
             to="/team"
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                isActive
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )
-            }
+            className={({ isActive }) => navLinkClass(isActive)}
           >
             <UsersRound className="size-4" />
             Team
           </NavLink>
         )}
       </nav>
+
+      {currentCourse && <CourseSection course={currentCourse} />}
 
       {recentCourses.length > 0 && (
         <div className="border-t border-sidebar-border p-3">

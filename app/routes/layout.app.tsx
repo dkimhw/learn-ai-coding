@@ -1,5 +1,7 @@
 import { Outlet } from "react-router";
 import type { Route } from "./+types/layout.app";
+import { UserRole } from "~/db/schema";
+import { getCourseById } from "~/services/courseService";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
@@ -13,6 +15,26 @@ import {
 } from "~/services/progressService";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { isTeamAdmin } from "~/services/teamService";
+import {
+  getNotifications,
+  getUnreadCount,
+  RECENT_NOTIFICATION_LIMIT,
+} from "~/services/notificationService";
+
+/**
+ * The course the instructor is currently working inside, read off the path
+ * rather than passed down from the route.
+ *
+ * Deriving it here means every existing `instructor/:courseId/*` route lights
+ * up the sidebar's course section without being modified — a lesson editor, a
+ * module, the roster, and analytics all name the same course. `/instructor` and
+ * `/instructor/new` do not match, so the section is absent there.
+ */
+function currentCourseIdFromPath(pathname: string): number | null {
+  const match = pathname.match(/^\/instructor\/(\d+)(?:\/|$)/);
+
+  return match ? parseInt(match[1], 10) : null;
+}
 
 export async function loader({ request }: Route.LoaderArgs) {
   const users = getAllUsers();
@@ -46,8 +68,45 @@ export async function loader({ request }: Route.LoaderArgs) {
       })
     : [];
 
+  // The section only offers links; each target route still enforces its own
+  // access rule. It is withheld from anyone who cannot see the course at all,
+  // so a student or a signed-out visitor never learns a course title from it.
+  const courseId = currentCourseIdFromPath(new URL(request.url).pathname);
+  const course = courseId === null ? null : getCourseById(courseId);
+  const canSeeCourse =
+    !!course &&
+    !!currentUser &&
+    (currentUser.role === UserRole.Admin ||
+      (currentUser.role === UserRole.Instructor &&
+        course.instructorId === currentUser.id));
+
+  // Only instructors have a bell, so nobody else pays for the two queries. They
+  // run on every navigation, which is what keeps the badge honest without
+  // polling — see the PRD's note on scale.
+  const isInstructor = currentUser?.role === UserRole.Instructor;
+  const notifications = isInstructor
+    ? getNotifications({
+        userId: currentUser.id,
+        limit: RECENT_NOTIFICATION_LIMIT,
+      })
+    : [];
+  const unreadNotificationCount = isInstructor
+    ? getUnreadCount(currentUser.id)
+    : 0;
+
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
+    notifications: notifications.map((n) => ({
+      id: n.id,
+      title: n.title,
+      message: n.message,
+      linkUrl: n.linkUrl,
+      isRead: n.isRead,
+      createdAt: n.createdAt,
+    })),
+    unreadNotificationCount,
+    currentCourse:
+      canSeeCourse && course ? { id: course.id, title: course.title } : null,
     currentUser: currentUser
       ? {
           id: currentUser.id,
@@ -68,19 +127,25 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
   const {
     users,
     currentUser,
+    currentCourse,
     recentCourses,
     devCountry,
     countryTierInfo,
     countries,
     isTeamAdmin: userIsTeamAdmin,
+    notifications,
+    unreadNotificationCount,
   } = loaderData;
 
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         currentUser={currentUser}
+        currentCourse={currentCourse}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
+        notifications={notifications}
+        unreadNotificationCount={unreadNotificationCount}
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />
