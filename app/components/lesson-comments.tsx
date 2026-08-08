@@ -66,7 +66,9 @@ export function LessonComments({
   commentCount: number;
 }) {
   return (
-    <Card className="mb-8">
+    // Named so other pages can link straight to the discussion — the instructor
+    // analytics page sends a flagged lesson here.
+    <Card id="discussion" className="mb-8 scroll-mt-6">
       <CardContent className="p-6">
         <div className="mb-4 flex items-center gap-2">
           <MessageSquare className="size-5 text-primary" />

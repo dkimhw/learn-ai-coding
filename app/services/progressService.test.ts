@@ -24,6 +24,7 @@ import {
   isLessonCompleted,
   getNextIncompleteLesson,
 } from "./progressService";
+import { enrollUser, findEnrollment } from "./enrollmentService";
 
 // Helper to create a module with lessons in the test db
 function createModuleWithLessons(
@@ -98,6 +99,78 @@ describe("progressService", () => {
       const progress = markLessonComplete(base.user.id, lessons[0].id);
 
       expect(progress.status).toBe(schema.LessonProgressStatus.Completed);
+    });
+
+    it("marks the enrollment complete when the last outstanding lesson is completed", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        2
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      markLessonComplete(base.user.id, lessons[0].id);
+      expect(
+        findEnrollment(base.user.id, base.course.id)!.completedAt
+      ).toBeNull();
+
+      markLessonComplete(base.user.id, lessons[1].id);
+      expect(
+        findEnrollment(base.user.id, base.course.id)!.completedAt
+      ).not.toBeNull();
+    });
+
+    it("does not re-stamp the enrollment when a lesson is completed again", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        1
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      markLessonComplete(base.user.id, lessons[0].id);
+      const stampedAt = findEnrollment(
+        base.user.id,
+        base.course.id
+      )!.completedAt;
+
+      markLessonComplete(base.user.id, lessons[0].id);
+
+      expect(findEnrollment(base.user.id, base.course.id)!.completedAt).toBe(
+        stampedAt
+      );
+    });
+
+    it("requires every module's lessons before completing the enrollment", () => {
+      const m1 = createModuleWithLessons(base.course.id, "Module 1", 1, 1);
+      const m2 = createModuleWithLessons(base.course.id, "Module 2", 2, 1);
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      markLessonComplete(base.user.id, m1.lessons[0].id);
+      expect(
+        findEnrollment(base.user.id, base.course.id)!.completedAt
+      ).toBeNull();
+
+      markLessonComplete(base.user.id, m2.lessons[0].id);
+      expect(
+        findEnrollment(base.user.id, base.course.id)!.completedAt
+      ).not.toBeNull();
+    });
+
+    it("completes the lesson without error when the student is not enrolled", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        1
+      );
+
+      const progress = markLessonComplete(base.user.id, lessons[0].id);
+
+      expect(progress.status).toBe(schema.LessonProgressStatus.Completed);
+      expect(findEnrollment(base.user.id, base.course.id)).toBeUndefined();
     });
   });
 

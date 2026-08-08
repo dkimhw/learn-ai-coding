@@ -69,6 +69,7 @@ import {
   Award,
   Globe,
   FileText,
+  BarChart3,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -1139,13 +1140,22 @@ export default function InstructorCourseEditor({
         <span className="text-foreground">{course.title}</span>
       </nav>
 
-      <Link
-        to="/instructor"
-        className="mb-4 inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="mr-1 size-4" />
-        Back to My Courses
-      </Link>
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <Link
+          to="/instructor"
+          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="mr-1 size-4" />
+          Back to My Courses
+        </Link>
+
+        <Link to={`/instructor/${course.id}/analytics`}>
+          <Button variant="outline" size="sm">
+            <BarChart3 className="mr-2 size-4" />
+            Analytics
+          </Button>
+        </Link>
+      </div>
 
       {/* Course Header with inline editing */}
       <div className="mb-8">
